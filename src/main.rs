@@ -13,7 +13,7 @@ use structopt::StructOpt;
 )]
 struct Opt {
     /// The version of the interface
-    version: u64,
+    version: u8,
 
     /// Watchman clockspec, it can be epoch second or clock id
     token: String,
@@ -22,18 +22,18 @@ struct Opt {
 fn main() {
     let opt = Opt::from_args();
 
-    if opt.version != 1 && opt.version != 2 {
+    if opt.version != 2 {
         eprintln!("unsupported version");
         exit(1);
     }
 
-    query_watchman(opt.version == 2, opt.token).unwrap_or_else(|e| {
+    query_watchman(opt.token).unwrap_or_else(|e| {
         eprintln!("{}", pretty_error(&e));
         exit(1);
     })
 }
 
-fn query_watchman(is_v2: bool, token: String) -> Fallible<()> {
+fn query_watchman(token: String) -> Fallible<()> {
     let git_work_tree = env::current_dir().context("Couldn't get working directory")?;
 
     let mut watchman = Command::new("watchman")
@@ -44,11 +44,7 @@ fn query_watchman(is_v2: bool, token: String) -> Fallible<()> {
         .context("Couldn't start watchman")?;
 
     {
-        let watchman_query = if is_v2 {
-            get_watchman_query_v2(&git_work_tree, token)
-        } else {
-            get_watchman_query_v1(&git_work_tree, token)
-        };
+        let watchman_query = get_watchman_query(&git_work_tree, token.clone());
 
         watchman
             .stdin
@@ -71,17 +67,16 @@ fn query_watchman(is_v2: bool, token: String) -> Fallible<()> {
     if let Some(err) = response["error"].as_str() {
         ensure!(
             err.contains("unable to resolve root"),
-            "Watchman failed for an unexpected reason {}",
-            err
+            "Watchman failed for an unexpected reason {} (token: {})",
+            err,
+            token
         );
         return add_to_watchman(&git_work_tree);
     }
 
     match response["files"].as_array() {
         Some(files) => {
-            if is_v2 {
-                print!("{}\0", response["clock"].as_str().unwrap_or(""));
-            }
+            print!("{}\0", response["clock"].as_str().unwrap_or(""));
             for file in files {
                 if let Some(filename) = file.as_str() {
                     print!("{}\0", filename);
@@ -153,34 +148,7 @@ fn pretty_error(err: &failure::Error) -> String {
     pretty
 }
 
-fn get_watchman_query_v1(git_work_tree: &std::path::Path, token: String) -> Value {
-    let epoch_seconds: u64 = token.parse().unwrap_or(0) / 1_000_000_000;
-    json!(
-         [
-             "query",
-             git_work_tree,
-             {
-                 "since": epoch_seconds,
-                 "fields": ["name"],
-                 "expression": [
-                     "not", [
-                         "allof",[
-                             "since",
-                             epoch_seconds,
-                             "cclock"
-                         ],
-                         [
-                             "not",
-                             "exists"
-                         ]
-                     ]
-                 ]
-             }
-        ]
-    )
-}
-
-fn get_watchman_query_v2(git_work_tree: &std::path::Path, token: String) -> Value {
+fn get_watchman_query(git_work_tree: &std::path::Path, token: String) -> Value {
     // the token following `since` expression can be either epoch second as integer or a clock id as string
     let token_value = if let Some('c') = token.chars().next() {
         Value::from(token)
