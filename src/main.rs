@@ -71,7 +71,17 @@ fn query_watchman(token: String) -> Fallible<()> {
             err,
             token
         );
-        return add_to_watchman(&git_work_tree);
+        match add_to_watchman(&git_work_tree) {
+            Ok(()) => {}
+            Err(e) => bail!(e),
+        }
+        match get_watchman_clock(&git_work_tree) {
+            Ok(clock_id) => {
+                print!("{}\0/\0", clock_id);
+                return Ok(());
+            }
+            Err(e) => bail!(e),
+        }
     }
 
     match response["files"].as_array() {
@@ -118,6 +128,58 @@ fn add_to_watchman(worktree: &std::path::Path) -> Fallible<()> {
     Ok(())
 }
 
+fn get_watchman_clock(worktree: &std::path::Path) -> Fallible<String> {
+    let watchman = Command::new("watchman")
+        .args(&[
+            "clock",
+            worktree
+                .to_str()
+                .expect("Working directory isn't valid Unicode"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("Couldn't start watchman clock")?;
+    let output = watchman
+        .wait_with_output()
+        .context("Failed to wait on watchman clock")?
+        .stdout;
+
+    let response: Value = serde_json::from_str(
+        String::from_utf8(output)
+            .context("Watchman didn't return valid JSON")?
+            .as_str(),
+    )?;
+    match response["clock"].as_str() {
+        Some(clock_id) => Ok(String::from(clock_id)),
+        None => bail!("failed to call watchman clock"),
+    }
+}
+
+fn get_watchman_query(git_work_tree: &std::path::Path, token: String) -> Value {
+    // the token following `since` expression can be either epoch second as integer or a clock id as string
+    let token_value = if let Some('c') = token.chars().next() {
+        Value::from(token)
+    } else {
+        Value::from(token.parse::<u64>().unwrap_or(0) / 1_000_000_000)
+    };
+    json!(
+        [
+            "query",
+            git_work_tree,
+            {
+                "since": token_value,
+                "fields": ["name"],
+                "expression": [
+                    "not", [
+                        "dirname", ".git"
+                    ]
+                ]
+            }
+        ]
+    )
+}
+
 // Borrowed lovingly from Burntsushi:
 // https://www.reddit.com/r/rust/comments/8fecqy/can_someone_show_an_example_of_failure_crate_usage/dy2u9q6/
 // Chains errors into a big string.
@@ -146,28 +208,4 @@ fn pretty_error(err: &failure::Error) -> String {
         prev = next;
     }
     pretty
-}
-
-fn get_watchman_query(git_work_tree: &std::path::Path, token: String) -> Value {
-    // the token following `since` expression can be either epoch second as integer or a clock id as string
-    let token_value = if let Some('c') = token.chars().next() {
-        Value::from(token)
-    } else {
-        Value::from(token.parse::<u64>().unwrap_or(0) / 1_000_000_000)
-    };
-    json!(
-        [
-            "query",
-            git_work_tree,
-            {
-                "since": token_value,
-                "fields": ["name"],
-                "expression": [
-                    "not", [
-                        "dirname", ".git"
-                    ]
-                ]
-            }
-        ]
-    )
 }
